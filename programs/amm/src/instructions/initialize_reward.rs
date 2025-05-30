@@ -1,6 +1,6 @@
 use crate::error::ErrorCode;
 use crate::libraries::{fixed_point_64, full_math::MulDiv, U256};
-use crate::util::{create_pool_vault_token_account, transfer_from_user_to_pool_vault};
+use crate::util::{create_token_vault_account, transfer_from_user_to_pool_vault};
 use crate::{states::*, util};
 use anchor_lang::prelude::*;
 use anchor_spl::token_interface::{Mint, TokenAccount, TokenInterface};
@@ -38,7 +38,7 @@ pub struct InitializeReward<'info> {
     /// Reward mint
     pub reward_token_mint: Box<InterfaceAccount<'info, Mint>>,
 
-    /// A pda, reward vault, initialized in contract.
+    /// CHECK: A pda, reward vault, initialized in contract.
     #[account(
         mut,
         seeds =[
@@ -109,19 +109,23 @@ pub fn initialize_reward(
     {
         return err!(ErrorCode::NotSupportMint);
     }
-    
+
     // init reward token vault
-    create_pool_vault_token_account(
+    create_token_vault_account(
         &ctx.accounts.reward_funder,
         &ctx.accounts.pool_state.to_account_info(),
         &ctx.accounts.reward_token_vault.to_account_info(),
-        ctx.bumps.reward_token_vault,
         &ctx.accounts.reward_token_mint,
         &ctx.accounts.system_program,
         &ctx.accounts.reward_token_program,
+        &[
+            POOL_REWARD_VAULT_SEED.as_bytes(),
+            ctx.accounts.pool_state.key().as_ref(),
+            ctx.accounts.reward_token_mint.key().as_ref(),
+            &[ctx.bumps.reward_token_vault][..],
+        ],
     )?;
-    
-    
+
     let operation_state = ctx.accounts.operation_state.load()?;
     require!(
         ctx.accounts.reward_funder.key() == crate::admin::ID

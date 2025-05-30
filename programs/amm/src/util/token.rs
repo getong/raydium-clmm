@@ -1,25 +1,24 @@
-use super::get_recent_epoch;
+use super::{create_or_allocate_account, get_recent_epoch};
 use crate::error::ErrorCode;
 use crate::states::*;
-use anchor_lang::{
-    prelude::*,
-    solana_program,
-    system_program::{create_account, CreateAccount},
-};
+use anchor_lang::solana_program::program_option::COption;
+use anchor_lang::{prelude::*, solana_program, system_program};
 use anchor_spl::memo::spl_memo;
 use anchor_spl::token::{self, Token};
-use anchor_spl::token_2022::{self, spl_token_2022::{
-    self,
-    extension::{
-        metadata_pointer,
-        transfer_fee::{TransferFeeConfig, MAX_FEE_BASIS_POINTS},
-        BaseStateWithExtensions, ExtensionType, StateWithExtensions,
+use anchor_spl::token_2022::{
+    self, get_account_data_size,
+    spl_token_2022::{
+        self,
+        extension::{
+            metadata_pointer,
+            transfer_fee::{TransferFeeConfig, MAX_FEE_BASIS_POINTS},
+            BaseStateWithExtensions, ExtensionType, StateWithExtensions,
+        },
     },
-}, InitializeAccount3, InitializeImmutableOwner, Token2022};
+    GetAccountDataSize, InitializeAccount3, InitializeImmutableOwner, Token2022,
+};
 use anchor_spl::token_interface::{initialize_mint2, InitializeMint2, Mint, TokenInterface};
 use std::collections::HashSet;
-use anchor_lang::solana_program::program_option::COption;
-use anchor_spl::token_2022::spl_token_2022::extension::ExtensionType::ImmutableOwner;
 
 const MINT_WHITELIST: [&'static str; 6] = [
     "HVbpJAQGNpkgBaYBZQBR1t7yFdvaYVp2vCQQfKKEN4tM",
@@ -339,10 +338,10 @@ pub fn create_position_nft_mint_with_extensions<'info>(
     let lamports = Rent::get()?.minimum_balance(space);
 
     // create mint account
-    create_account(
+    system_program::create_account(
         CpiContext::new(
             system_program.to_account_info(),
-            CreateAccount {
+            system_program::CreateAccount {
                 from: payer.to_account_info(),
                 to: position_nft_mint.to_account_info(),
             },
@@ -417,78 +416,69 @@ pub fn create_position_nft_mint_with_extensions<'info>(
     )
 }
 
-pub fn create_pool_vault_token_account<'info>(
+pub fn create_token_vault_account<'info>(
     payer: &Signer<'info>,
     pool_state: &AccountInfo<'info>,
-    token_account:  &AccountInfo<'info>,
-    token_account_bump: u8,
+    token_account: &AccountInfo<'info>,
     token_mint: &InterfaceAccount<'info, Mint>,
     system_program: &Program<'info, System>,
     token_2022_program: &Interface<'info, TokenInterface>,
+    signer_seeds: &[&[u8]],
 ) -> Result<()> {
-    
     let immutable_owner_required = is_superstate_token(token_mint);
 
-    let space = if immutable_owner_required {
-        ExtensionType::try_calculate_account_len::<spl_token_2022::state::Account>(&[ImmutableOwner])?
-    } else {
-        ExtensionType::try_calculate_account_len::<spl_token_2022::state::Account>(&[])?
-    };
-
-    let lamports = Rent::get()?.minimum_balance(space);
-    
-    // create account
-    create_account(
-        CpiContext::new_with_signer(
-            system_program.to_account_info(),
-            CreateAccount {
-                from: payer.to_account_info(),
-                to: token_account.to_account_info(),
-            },
-            &[&[
-                POOL_VAULT_SEED.as_bytes(),
-                pool_state.key().as_ref(),
-                token_mint.key().as_ref(),
-                &[token_account_bump]
-            ]]
-        ),
-        lamports,
-        space as u64,
-        token_2022_program.key,
-    )?;
-    
-    // Call initializeImmutableOwner
-    if immutable_owner_required {
-        token_2022::initialize_immutable_owner(
-            CpiContext::new(
-                token_2022_program.to_account_info(),
-                InitializeImmutableOwner {
-                    account: token_account.to_account_info(),
-                },
-            )
-        )?;
-    }
-    
-    // Call initializeAccount3
-    token_2022::initialize_account3(
+    // support both spl_token_program & token_program_2022
+    let space = get_account_data_size(
         CpiContext::new(
             token_2022_program.to_account_info(),
-            InitializeAccount3 {
-                account: token_account.to_account_info(),
+            GetAccountDataSize {
                 mint: token_mint.to_account_info(),
-                authority: pool_state.to_account_info(),
             },
-        )
+        ),
+        if immutable_owner_required {
+            &[ExtensionType::ImmutableOwner]
+        } else {
+            &[]
+        },
     )?;
-    
+
+    // create account with or without lamports
+    create_or_allocate_account(
+        token_2022_program.key,
+        payer.to_account_info(),
+        system_program.to_account_info(),
+        token_account.to_account_info(),
+        signer_seeds,
+        space.try_into().unwrap(),
+    )?;
+
+    // Call initializeImmutableOwner
+    if immutable_owner_required {
+        token_2022::initialize_immutable_owner(CpiContext::new(
+            token_2022_program.to_account_info(),
+            InitializeImmutableOwner {
+                account: token_account.to_account_info(),
+            },
+        ))?;
+    }
+
+    // Call initializeAccount3
+    token_2022::initialize_account3(CpiContext::new(
+        token_2022_program.to_account_info(),
+        InitializeAccount3 {
+            account: token_account.to_account_info(),
+            mint: token_mint.to_account_info(),
+            authority: pool_state.to_account_info(),
+        },
+    ))?;
+
     Ok(())
 }
 
-pub fn is_superstate_token(
-    mint_account: &InterfaceAccount<Mint>
-) -> bool {
+pub fn is_superstate_token(mint_account: &InterfaceAccount<Mint>) -> bool {
     if let COption::Some(freeze_authority) = mint_account.freeze_authority {
         superstate_allowlist::ID == freeze_authority
+            && *mint_account.to_account_info().owner == spl_token_2022::ID
     } else {
         false
     }
